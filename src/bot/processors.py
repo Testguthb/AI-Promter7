@@ -51,13 +51,12 @@ async def start_automated_generation(message: Message, state: FSMContext, user_i
 
 
 async def process_with_automated_claude(message: Message, state: FSMContext, user_id: int):
-    """Automated processing with Claude Sonnet 4 with length control and file management."""
+    """Automated processing with Claude Sonnet 4 using the queue system for proper statistics tracking."""
     try:
         session = user_sessions[user_id]
         outline = session["outline"]
         sonnet_prompt = session.get("sonnet_prompt", "")
         target_volume = session["target_volume"]
-        multithread_mode = session["multithread_mode"]
         
         await state.set_state(ProcessingStates.processing)
         
@@ -70,10 +69,15 @@ async def process_with_automated_claude(message: Message, state: FSMContext, use
         else:  # 60k
             min_length, max_length = 56000, 68000
         
+        # Initialize session statistics for compatibility
+        session["attempt_count"] = 0
+        session["valid_responses"] = 0
+        session["invalid_responses"] = 0
+        
         progress_msg = await message.answer("🔄 Запуск автоматизованого процесу генерації...")
         
-        # Use single request generation (removed multithread/concurrent mode)
-        await process_single_request_generation(message, state, user_id, progress_msg, min_length, max_length)
+        # Use queue system for proper statistics tracking
+        await add_project_to_queue_and_track(message, state, user_id, progress_msg, min_length, max_length)
             
     except Exception as e:
         logger.error(f"Error in automated processing: {e}")
@@ -82,6 +86,121 @@ async def process_with_automated_claude(message: Message, state: FSMContext, use
         if user_id in user_sessions:
             del user_sessions[user_id]
         await state.clear()
+
+
+async def add_project_to_queue_and_track(message: Message, state: FSMContext, user_id: int, 
+                                       progress_msg: Message, min_length: int, max_length: int):
+    """Add project to queue and track its progress with real-time updates."""
+    from src.core.project_queue import project_queue, ProjectTask
+    from datetime import datetime
+    
+    try:
+        session = user_sessions[user_id]
+        
+        # Generate unique project ID
+        project_id = f"project_{user_id}_{int(datetime.now().timestamp())}"
+        
+        # Create project task
+        task = ProjectTask(
+            project_id=project_id,
+            user_id=user_id,
+            outline=session["outline"],
+            sonnet_prompt=session.get("sonnet_prompt", ""),
+            target_volume=session["target_volume"],
+            min_length=min_length,
+            max_length=max_length
+        )
+        
+        # Add to queue
+        await project_queue.add_project(task)
+        
+        # Update progress message with queue info
+        stats = project_queue.get_queue_stats()
+        await progress_msg.edit_text(
+            f"✅ **Проект додано до черги!**\n\n"
+            f"🆔 ID проекту: `{project_id[-12:]}`\n"
+            f"📊 Цільовий обсяг: {session['target_volume'].upper()} ({min_length:,}-{max_length:,} символів)\n\n"
+            f"📈 **Статистика черги:**\n"
+            f"• 🔄 В обробці: {stats['processing']}\n"
+            f"• ⏳ В черзі: {stats['queued']}\n"
+            f"• 📊 Всього проектів: {stats['total_projects']}\n\n"
+            f"⏳ Очікуйте початку обробки...",
+            parse_mode="Markdown"
+        )
+        
+        # Track project progress
+        await track_project_progress(progress_msg, project_id, user_id, session)
+        
+    except Exception as e:
+        logger.error(f"Error adding project to queue: {e}")
+        await progress_msg.edit_text(f"❌ Помилка додавання проекту до черги: {str(e)}")
+
+
+async def track_project_progress(progress_msg: Message, project_id: str, user_id: int, session: dict):
+    """Track project progress and update the message in real-time."""
+    from src.core.project_queue import project_queue, ProjectStatus
+    import asyncio
+    
+    last_attempt_count = 0
+    last_valid_count = 0
+    
+    while True:
+        try:
+            task = await project_queue.get_project_status(project_id)
+            if not task:
+                break
+                
+            # Update session statistics for compatibility
+            session["attempt_count"] = task.attempt_count
+            session["valid_responses"] = task.valid_responses
+            session["invalid_responses"] = task.invalid_responses
+            
+            # Only update message if there are changes to avoid rate limits
+            if (task.attempt_count != last_attempt_count or 
+                task.valid_responses != last_valid_count):
+                
+                if task.status == ProjectStatus.PROCESSING:
+                    await progress_msg.edit_text(
+                        f"🔄 **Спроба {task.attempt_count}/20**\n\n"
+                        f"📊 Цільовий діапазон: {task.min_length:,} - {task.max_length:,} символів\n"
+                        f"✅ Валідних відповідей: {task.valid_responses}\n"
+                        f"❌ Невалідних відповідей: {task.invalid_responses}\n\n"
+                        f"🆔 Проект: `{project_id[-12:]}`",
+                        parse_mode="Markdown"
+                    )
+                
+                last_attempt_count = task.attempt_count
+                last_valid_count = task.valid_responses
+            
+            # Check if completed or failed
+            if task.status == ProjectStatus.COMPLETED:
+                await progress_msg.edit_text(
+                    f"✅ **Проект завершено успішно!**\n\n"
+                    f"📊 Спроб: {task.attempt_count}\n"
+                    f"✅ Валідних відповідей: {task.valid_responses}\n"
+                    f"🆔 Проект: `{project_id[-12:]}`\n\n"
+                    f"📁 Файли збережено в папку проекту.",
+                    parse_mode="Markdown"
+                )
+                break
+                
+            elif task.status == ProjectStatus.FAILED:
+                await progress_msg.edit_text(
+                    f"❌ **Проект завершено з помилкою**\n\n"
+                    f"📊 Спроб: {task.attempt_count}\n"
+                    f"✅ Валідних відповідей: {task.valid_responses}\n"
+                    f"🆔 Проект: `{project_id[-12:]}`\n\n"
+                    f"❌ Помилка: {task.error_message or 'Невідома помилка'}",
+                    parse_mode="Markdown"
+                )
+                break
+            
+            # Wait before next check
+            await asyncio.sleep(2)
+            
+        except Exception as e:
+            logger.error(f"Error tracking project progress: {e}")
+            await asyncio.sleep(5)
 
 
 async def process_single_request_generation(message: Message, state: FSMContext, user_id: int, 
