@@ -207,13 +207,14 @@ async def status_command(message: Message, state: FSMContext):
     user_projects = await project_queue.get_user_projects(user_id)
     queue_stats = project_queue.get_queue_stats()
     
-    if user_projects or queue_stats['total_projects'] > 0:
+    if user_projects or queue_stats['total_projects'] > 0 or queue_stats['total_processed'] > 0:
         status_info += f"""
 
 **📊 Черга проектів:**
 **Ваші проекти:** {len(user_projects)}
-**Загальна черга:** В черзі: {queue_stats['queued']}, Обробляється: {queue_stats['processing']}
-**Завершено:** {queue_stats['completed']}, Помилки: {queue_stats['failed']}
+**Поточна черга:** В черзі: {queue_stats['queued']}, Обробляється: {queue_stats['processing']}
+**Загальна статистика:** Завершено: {queue_stats['completed']}, Помилки: {queue_stats['failed']}
+**Всього оброблено:** {queue_stats['total_processed']} проектів
 """
     
     await message.answer(status_info, parse_mode="Markdown")
@@ -247,7 +248,8 @@ async def queue_command(message: Message):
     queue_text += f"• Обробляється: {queue_stats['processing']}\n"
     queue_text += f"• Завершено: {queue_stats['completed']}\n"
     queue_text += f"• Помилки: {queue_stats['failed']}\n"
-    queue_text += f"• Всього проектів: {queue_stats['total_projects']}\n\n"
+    queue_text += f"• Активних проектів: {queue_stats['total_projects']}\n"
+    queue_text += f"• Всього оброблено: {queue_stats['total_processed']}\n\n"
     
     if user_projects:
         # Sort projects by creation time
