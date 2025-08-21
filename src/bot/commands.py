@@ -90,7 +90,7 @@ async def help_command(message: Message):
 /start - Почати роботу з ботом
 /help - Показати це повідомлення
 /cancel - Скасувати поточну операцію
-/status - Показати поточний статус та чергу проектів
+/status - Показати загальний статус системи, проекти в обробці в Claude та чергу
 /queue - Детальна інформація про чергу проектів
 
 **🚀 Новий функціонал - Черга проектів:**
@@ -168,55 +168,110 @@ async def cancel_command(message: Message, state: FSMContext):
 
 @commands_router.message(Command("status"))
 async def status_command(message: Message, state: FSMContext):
-    """Handle /status command."""
+    """Handle /status command - show current session and all projects in processing/queue."""
     user_id = message.from_user.id
     current_state = await state.get_state()
     
-    if user_id not in user_sessions:
-        await message.answer("📋 Немає активної сесії. Використайте /start для початку.")
-        return
+    from src.core.project_queue import project_queue, ProjectStatus
     
-    session = user_sessions[user_id]
-    
-    template_info = session.get('selected_template', {})
-    template_name = template_info.get('filename', 'Не обрано')
-    template_ai_type = template_info.get('ai_type', 'Не обрано')
-    
-    status_info = f"""
-**📊 Поточний статус:**
-
-**Стан:** {current_state or 'Очікування'}
-**Файл завантажено:** {'✅' if session.get('current_text') else '❌'}
-**Outline готовий:** {'✅' if session.get('outline') else '❌'}
-**Тип промту:** {template_ai_type.upper() if template_ai_type != 'Не обрано' else 'Власний/Не обрано'}
-**Шаблон:** {template_name[:30]}{'...' if len(template_name) > 30 else ''}
-**GPT Промт:** {session.get('custom_prompt', 'Не встановлено')[:50]}...
-**Sonnet Промт:** {session.get('sonnet_prompt', 'Не встановлено')[:50]}...
-**Цільовий обсяг:** {session.get('target_volume', 'Не обрано')}
-**Багатопотоковий режим:** {'❌ (Відключено)' if session.get('multithread_mode') else '✅ Одиночний запит'}
-**Загальна кількість спроб:** {session.get('attempt_count', 0)}
-**Успішних генерацій:** {session.get('successful_attempts', 0)}
-**Валідних відповідей:** {session.get('valid_responses', 0)}
-**Невалідних відповідей:** {session.get('invalid_responses', 0)}
-**Паузи в API:** {session.get('attempt_count', 0) - session.get('successful_attempts', 0)}
-    """
-    
-    # Add queue information
-    from src.core.project_queue import project_queue
-    
+    # Get all queue information
     user_projects = await project_queue.get_user_projects(user_id)
     queue_stats = project_queue.get_queue_stats()
+    all_projects = list(project_queue.projects.values())
     
-    if user_projects or queue_stats['total_projects'] > 0:
-        status_info += f"""
-
-**📊 Черга проектів:**
-**Ваші проекти:** {len(user_projects)}
-**Загальна черга:** В черзі: {queue_stats['queued']}, Обробляється: {queue_stats['processing']}
-**Завершено:** {queue_stats['completed']}, Помилки: {queue_stats['failed']}
-"""
+    # Build comprehensive status message
+    status_info = "🔍 **ЗАГАЛЬНИЙ СТАТУС СИСТЕМИ**\n\n"
     
-    await message.answer(status_info, parse_mode="Markdown")
+    # Global queue statistics
+    status_info += f"**🌐 Статистика черги Claude Sonnet 4:**\n"
+    status_info += f"• 🔄 Обробляється зараз: **{queue_stats['processing']}** проектів\n"
+    status_info += f"• ⏳ В черзі очікує: **{queue_stats['queued']}** проектів\n"
+    status_info += f"• ✅ Завершено: **{queue_stats['completed']}** проектів\n"
+    status_info += f"• ❌ Помилки: **{queue_stats['failed']}** проектів\n"
+    status_info += f"• 📊 Всього проектів: **{queue_stats['total_projects']}**\n\n"
+    
+    # Show currently processing projects (all users)
+    processing_projects = [p for p in all_projects if p.status == ProjectStatus.PROCESSING]
+    if processing_projects:
+        status_info += f"**🔄 ПРОЕКТИ В ОБРОБЦІ В CLAUDE ({len(processing_projects)}):**\n\n"
+        for i, project in enumerate(processing_projects, 1):
+            user_marker = "👤 (Ваш)" if project.user_id == user_id else "👥 (Інший користувач)"
+            status_info += f"**{i}.** `{project.project_id[-12:]}` {user_marker}\n"
+            status_info += f"   📅 Запущено: {project.created_at.strftime('%d.%m %H:%M:%S')}\n"
+            status_info += f"   📊 Обсяг: {project.target_volume.upper()}\n"
+            status_info += f"   🔄 Спроб: {project.attempt_count}, ✅ Валідних: {project.valid_responses}\n\n"
+    
+    # Show queued projects (all users)
+    queued_projects = [p for p in all_projects if p.status == ProjectStatus.QUEUED]
+    if queued_projects:
+        status_info += f"**⏳ ПРОЕКТИ В ЧЕРЗІ ({len(queued_projects)}):**\n\n"
+        for i, project in enumerate(queued_projects, 1):
+            user_marker = "👤 (Ваш)" if project.user_id == user_id else "👥 (Інший користувач)"
+            status_info += f"**{i}.** `{project.project_id[-12:]}` {user_marker}\n"
+            status_info += f"   📅 Створено: {project.created_at.strftime('%d.%m %H:%M:%S')}\n"
+            status_info += f"   📊 Обсяг: {project.target_volume.upper()}\n\n"
+    
+    # Show user's personal session info if exists
+    if user_id in user_sessions:
+        session = user_sessions[user_id]
+        template_info = session.get('selected_template', {})
+        template_name = template_info.get('filename', 'Не обрано')
+        template_ai_type = template_info.get('ai_type', 'Не обрано')
+        
+        status_info += f"**👤 ВАША ПОТОЧНА СЕСІЯ:**\n\n"
+        status_info += f"**Стан:** {current_state or 'Очікування'}\n"
+        status_info += f"**Файл завантажено:** {'✅' if session.get('current_text') else '❌'}\n"
+        status_info += f"**Outline готовий:** {'✅' if session.get('outline') else '❌'}\n"
+        status_info += f"**Тип промту:** {template_ai_type.upper() if template_ai_type != 'Не обрано' else 'Власний/Не обрано'}\n"
+        status_info += f"**Шаблон:** {template_name[:30]}{'...' if len(template_name) > 30 else ''}\n"
+        status_info += f"**Цільовий обсяг:** {session.get('target_volume', 'Не обрано')}\n"
+        
+        if session.get('attempt_count', 0) > 0:
+            status_info += f"**Статистика сесії:** {session.get('attempt_count', 0)} спроб, "
+            status_info += f"{session.get('valid_responses', 0)} валідних\n"
+        
+        status_info += "\n"
+    
+    # Show user's recent projects summary
+    if user_projects:
+        recent_projects = sorted(user_projects, key=lambda x: x.created_at, reverse=True)[:5]
+        status_info += f"**📋 ВАШІ ОСТАННІ ПРОЕКТИ ({len(user_projects)} всього):**\n\n"
+        
+        for i, project in enumerate(recent_projects, 1):
+            status_emoji = {
+                ProjectStatus.QUEUED: "⏳",
+                ProjectStatus.PROCESSING: "🔄", 
+                ProjectStatus.COMPLETED: "✅",
+                ProjectStatus.FAILED: "❌"
+            }.get(project.status, "❓")
+            
+            status_info += f"{status_emoji} **{i}.** `{project.project_id[-12:]}`"
+            if project.status == ProjectStatus.PROCESSING:
+                status_info += f" (обробляється...)\n"
+            elif project.status == ProjectStatus.COMPLETED:
+                status_info += f" (завершено, {project.valid_responses} валідних)\n"
+            elif project.status == ProjectStatus.FAILED:
+                status_info += f" (помилка)\n"
+            else:
+                status_info += f" (в черзі)\n"
+            
+            status_info += f"   📅 {project.created_at.strftime('%d.%m %H:%M:%S')}"
+            status_info += f", 📊 {project.target_volume.upper()}\n\n"
+    
+    # Add action buttons
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🔄 Оновити статус", callback_data="refresh_status"),
+            InlineKeyboardButton(text="📋 Детальна черга", callback_data="view_queue")
+        ],
+        [
+            InlineKeyboardButton(text="🚀 Нова обробка", callback_data="start_new_processing")
+        ]
+    ])
+    
+    await message.answer(status_info, reply_markup=keyboard, parse_mode="Markdown")
 
 
 @commands_router.message(Command("queue"))
