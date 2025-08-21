@@ -236,3 +236,15 @@ async def view_queue_callback(callback: CallbackQuery):
         reply_markup=keyboard,
         parse_mode="Markdown"
     )
+
+
+@queue_router.callback_query(lambda c: c.data == "refresh_status")
+async def refresh_status_callback(callback: CallbackQuery, state: FSMContext):
+    """Handle refreshing status - same as /status command."""
+    await callback.answer()
+    
+    # Import the status command function
+    from .commands import status_command
+    
+    # Call the status command with callback message
+    await status_command(callback.message, state)
