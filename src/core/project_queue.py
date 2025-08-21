@@ -49,6 +49,11 @@ class ProjectQueue:
         self._processing_lock = asyncio.Lock()
         self._queue_processor_task = None
         
+        # Persistent counters for statistics that don't get reset by cleanup
+        self.total_completed_count = 0
+        self.total_failed_count = 0
+        self.total_processed_count = 0
+        
     async def start_queue_processor(self):
         """Start the queue processor task."""
         if self._queue_processor_task is None or self._queue_processor_task.done():
@@ -193,11 +198,15 @@ class ProjectQueue:
                 if found_valid:
                     task.status = ProjectStatus.COMPLETED
                     self.completed.append(project_id)
+                    self.total_completed_count += 1
+                    self.total_processed_count += 1
                     logger.info(f"Project {project_id} completed successfully")
                 else:
                     task.status = ProjectStatus.FAILED
                     task.error_message = f"Max attempts ({max_attempts}) reached without valid result"
                     self.failed.append(project_id)
+                    self.total_failed_count += 1
+                    self.total_processed_count += 1
                     logger.info(f"Project {project_id} failed after {max_attempts} attempts")
                     
         except Exception as e:
@@ -209,6 +218,8 @@ class ProjectQueue:
                 task.status = ProjectStatus.FAILED
                 task.error_message = str(e)
                 self.failed.append(project_id)
+                self.total_failed_count += 1
+                self.total_processed_count += 1
     
     async def _save_project_result(self, result: str, task: ProjectTask, min_length: int, max_length: int) -> bool:
         """Save project result and return whether it's valid."""
@@ -243,12 +254,32 @@ class ProjectQueue:
     
     def get_queue_stats(self) -> dict:
         """Get current queue statistics."""
+        # Count current active projects by their actual status
+        current_stats = {
+            "queued": 0,
+            "processing": 0,
+            "completed_active": 0,
+            "failed_active": 0,
+        }
+        
+        for task in self.projects.values():
+            if task.status == ProjectStatus.QUEUED:
+                current_stats["queued"] += 1
+            elif task.status == ProjectStatus.PROCESSING:
+                current_stats["processing"] += 1
+            elif task.status == ProjectStatus.COMPLETED:
+                current_stats["completed_active"] += 1
+            elif task.status == ProjectStatus.FAILED:
+                current_stats["failed_active"] += 1
+        
+        # Return combined statistics
         return {
-            "queued": len(self.queue),
-            "processing": len(self.processing),
-            "completed": len(self.completed),
-            "failed": len(self.failed),
-            "total_projects": len(self.projects)
+            "queued": current_stats["queued"],
+            "processing": current_stats["processing"],
+            "completed": self.total_completed_count,  # Total including cleaned up
+            "failed": self.total_failed_count,  # Total including cleaned up
+            "total_projects": len(self.projects),  # Current active projects
+            "total_processed": self.total_processed_count  # All-time processed count
         }
     
     async def cleanup_old_projects(self, max_age_hours: int = 24):
