@@ -90,7 +90,7 @@ async def help_command(message: Message):
 /start - Почати роботу з ботом
 /help - Показати це повідомлення
 /cancel - Скасувати поточну операцію
-/status - Показати загальний статус системи, проекти в обробці в Claude та чергу
+/status - Показати статус паралельної обробки в реальному часі та активні потоки
 /queue - Детальна інформація про чергу проектів
 
 **🚀 Новий функціонал - Черга проектів:**
@@ -168,48 +168,76 @@ async def cancel_command(message: Message, state: FSMContext):
 
 @commands_router.message(Command("status"))
 async def status_command(message: Message, state: FSMContext):
-    """Handle /status command - show current session and all projects in processing/queue."""
+    """Handle /status command - show real-time parallel processing statistics."""
     user_id = message.from_user.id
     current_state = await state.get_state()
     
     from src.core.project_queue import project_queue, ProjectStatus
+    from datetime import datetime, timedelta
     
-    # Get all queue information
+    # Get all processing information
     user_projects = await project_queue.get_user_projects(user_id)
-    queue_stats = project_queue.get_queue_stats()
     all_projects = list(project_queue.projects.values())
     
-    # Build comprehensive status message
-    status_info = "🔍 **ЗАГАЛЬНИЙ СТАТУС СИСТЕМИ**\n\n"
+    # Build real-time status message
+    status_info = "⚡ **СТАТУС ПАРАЛЕЛЬНОЇ ОБРОБКИ В РЕАЛЬНОМУ ЧАСІ**\n\n"
     
-    # Global queue statistics
-    status_info += f"**🌐 Статистика черги Claude Sonnet 4:**\n"
-    status_info += f"• 🔄 Обробляється зараз: **{queue_stats['processing']}** проектів\n"
-    status_info += f"• ⏳ В черзі очікує: **{queue_stats['queued']}** проектів\n"
-    status_info += f"• ✅ Завершено: **{queue_stats['completed']}** проектів\n"
-    status_info += f"• ❌ Помилки: **{queue_stats['failed']}** проектів\n"
-    status_info += f"• 📊 Всього проектів: **{queue_stats['total_projects']}**\n\n"
-    
-    # Show currently processing projects (all users)
+    # Get real-time processing statistics
+    realtime_stats = project_queue.get_realtime_stats()
     processing_projects = [p for p in all_projects if p.status == ProjectStatus.PROCESSING]
+    
+    status_info += f"**🚀 Паралельна обробка Claude Sonnet 4:**\n"
+    status_info += f"• 🔄 Активних потоків: **{realtime_stats['active_threads']}/{realtime_stats['max_concurrent']}**\n"
+    
+    if realtime_stats['active_threads'] > 0:
+        status_info += f"• 📈 Загальна успішність: **{realtime_stats['total_success_rate']:.1f}%** ({realtime_stats['total_valid']}/{realtime_stats['total_attempts']} спроб)\n"
+        status_info += f"• ⏱️ Середній час обробки: **{realtime_stats['avg_processing_time']/60:.1f} хв**\n"
+        status_info += f"• ⚡ Середня швидкість: **{realtime_stats['avg_processing_speed']:.1f}** спроб/хв\n"
+        status_info += f"• 🎯 Використання ресурсів: **{realtime_stats['resource_utilization']:.0f}%**\n"
+    else:
+        status_info += f"• 💤 Система в режимі очікування\n"
+        
+    status_info += "\n"
+    
+    # Show real-time processing details
     if processing_projects:
-        status_info += f"**🔄 ПРОЕКТИ В ОБРОБЦІ В CLAUDE ({len(processing_projects)}):**\n\n"
+        status_info += f"**🔄 АКТИВНІ ПОТОКИ ОБРОБКИ ({len(processing_projects)}):**\n\n"
         for i, project in enumerate(processing_projects, 1):
             user_marker = "👤 (Ваш)" if project.user_id == user_id else "👥 (Інший користувач)"
+            
+            # Use real-time tracking data
+            processing_minutes = project.total_processing_time / 60 if project.total_processing_time > 0 else 0
+            current_success_rate = (project.valid_responses / project.attempt_count * 100) if project.attempt_count > 0 else 0
+            
+            # Show last attempt time if available
+            last_attempt_info = ""
+            if project.last_attempt_at:
+                seconds_since_last = (datetime.now() - project.last_attempt_at).total_seconds()
+                if seconds_since_last < 60:
+                    last_attempt_info = f" (остання спроба {seconds_since_last:.0f}с тому)"
+                else:
+                    last_attempt_info = f" (остання спроба {seconds_since_last/60:.1f}хв тому)"
+            
             status_info += f"**{i}.** `{project.project_id[-12:]}` {user_marker}\n"
-            status_info += f"   📅 Запущено: {project.created_at.strftime('%d.%m %H:%M:%S')}\n"
+            status_info += f"   ⏱️ Активний: **{processing_minutes:.1f} хв**{last_attempt_info}\n"
             status_info += f"   📊 Обсяг: {project.target_volume.upper()}\n"
-            status_info += f"   🔄 Спроб: {project.attempt_count}, ✅ Валідних: {project.valid_responses}\n\n"
+            status_info += f"   🎯 Поточна успішність: **{current_success_rate:.1f}%**\n"
+            status_info += f"   🔄 Спроб: {project.attempt_count} (✅ {project.valid_responses}, ❌ {project.invalid_responses})\n"
+            status_info += f"   ⚡ Швидкість: **{project.current_processing_speed:.1f}** спроб/хв\n\n"
     
-    # Show queued projects (all users)
+    # Show waiting projects (if any)
     queued_projects = [p for p in all_projects if p.status == ProjectStatus.QUEUED]
     if queued_projects:
-        status_info += f"**⏳ ПРОЕКТИ В ЧЕРЗІ ({len(queued_projects)}):**\n\n"
-        for i, project in enumerate(queued_projects, 1):
+        status_info += f"**⏳ ОЧІКУЮТЬ ПОЧАТКУ ОБРОБКИ ({len(queued_projects)}):**\n\n"
+        for i, project in enumerate(queued_projects[:3], 1):  # Show only first 3
             user_marker = "👤 (Ваш)" if project.user_id == user_id else "👥 (Інший користувач)"
+            wait_time = (datetime.now() - project.created_at).total_seconds() / 60
             status_info += f"**{i}.** `{project.project_id[-12:]}` {user_marker}\n"
-            status_info += f"   📅 Створено: {project.created_at.strftime('%d.%m %H:%M:%S')}\n"
+            status_info += f"   ⏰ Очікує: **{wait_time:.1f} хв**\n"
             status_info += f"   📊 Обсяг: {project.target_volume.upper()}\n\n"
+        
+        if len(queued_projects) > 3:
+            status_info += f"   ... та ще **{len(queued_projects) - 3}** проектів\n\n"
     
     # Show user's personal session info if exists
     if user_id in user_sessions:
@@ -232,10 +260,10 @@ async def status_command(message: Message, state: FSMContext):
         
         status_info += "\n"
     
-    # Show user's recent projects summary
+    # Show user's projects with real-time performance
     if user_projects:
         recent_projects = sorted(user_projects, key=lambda x: x.created_at, reverse=True)[:5]
-        status_info += f"**📋 ВАШІ ОСТАННІ ПРОЕКТИ ({len(user_projects)} всього):**\n\n"
+        status_info += f"**📋 ВАШІ ПРОЕКТИ ({len(user_projects)} всього):**\n\n"
         
         for i, project in enumerate(recent_projects, 1):
             status_emoji = {
@@ -246,25 +274,34 @@ async def status_command(message: Message, state: FSMContext):
             }.get(project.status, "❓")
             
             status_info += f"{status_emoji} **{i}.** `{project.project_id[-12:]}`"
-            if project.status == ProjectStatus.PROCESSING:
-                status_info += f" (обробляється...)\n"
-            elif project.status == ProjectStatus.COMPLETED:
-                status_info += f" (завершено, {project.valid_responses} валідних)\n"
-            elif project.status == ProjectStatus.FAILED:
-                status_info += f" (помилка)\n"
-            else:
-                status_info += f" (в черзі)\n"
             
-            status_info += f"   📅 {project.created_at.strftime('%d.%m %H:%M:%S')}"
-            status_info += f", 📊 {project.target_volume.upper()}\n\n"
+            if project.status == ProjectStatus.PROCESSING:
+                processing_time = (datetime.now() - project.created_at).total_seconds() / 60
+                current_rate = (project.valid_responses / project.attempt_count * 100) if project.attempt_count > 0 else 0
+                status_info += f" **АКТИВНИЙ** ({processing_time:.1f} хв, {current_rate:.0f}% успішність)\n"
+            elif project.status == ProjectStatus.COMPLETED:
+                total_time = (datetime.now() - project.created_at).total_seconds() / 60
+                final_rate = (project.valid_responses / project.attempt_count * 100) if project.attempt_count > 0 else 0
+                status_info += f" завершено ({total_time:.1f} хв, {final_rate:.0f}% успішність)\n"
+            elif project.status == ProjectStatus.FAILED:
+                failed_time = (datetime.now() - project.created_at).total_seconds() / 60
+                status_info += f" помилка після {failed_time:.1f} хв\n"
+            else:
+                wait_time = (datetime.now() - project.created_at).total_seconds() / 60
+                status_info += f" очікує {wait_time:.1f} хв\n"
+            
+            status_info += f"   📅 {project.created_at.strftime('%d.%m %H:%M:%S')}, 📊 {project.target_volume.upper()}\n"
+            if project.attempt_count > 0:
+                status_info += f"   📈 Спроби: {project.attempt_count}, Валідні: {project.valid_responses}\n"
+            status_info += "\n"
     
-    # Add action buttons
+    # Add action buttons focused on real-time monitoring
     from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="🔄 Оновити статус", callback_data="refresh_status"),
-            InlineKeyboardButton(text="📋 Детальна черга", callback_data="view_queue")
+            InlineKeyboardButton(text="🔄 Оновити в реальному часі", callback_data="refresh_status"),
+            InlineKeyboardButton(text="📊 Детальна статистика", callback_data="view_detailed_stats")
         ],
         [
             InlineKeyboardButton(text="🚀 Нова обробка", callback_data="start_new_processing")
