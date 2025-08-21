@@ -34,6 +34,11 @@ class ProjectTask:
     valid_files: List[dict] = field(default_factory=list)
     invalid_files: List[dict] = field(default_factory=list)
     error_message: Optional[str] = None
+    # Real-time tracking fields
+    started_processing_at: Optional[datetime] = None
+    last_attempt_at: Optional[datetime] = None
+    total_processing_time: float = 0.0  # in seconds
+    current_processing_speed: float = 0.0  # attempts per minute
 
 
 class ProjectQueue:
@@ -121,6 +126,7 @@ class ProjectQueue:
                         self.processing.append(project_id)
                         task = self.projects[project_id]
                         task.status = ProjectStatus.PROCESSING
+                        task.started_processing_at = datetime.now()
                         
                         logger.info(f"Starting processing for project {project_id}")
                         
@@ -159,6 +165,14 @@ class ProjectQueue:
             
             while not found_valid and task.attempt_count < max_attempts:
                 task.attempt_count += 1
+                task.last_attempt_at = datetime.now()
+                
+                # Calculate current processing speed
+                if task.started_processing_at:
+                    processing_time = (datetime.now() - task.started_processing_at).total_seconds()
+                    task.total_processing_time = processing_time
+                    if processing_time > 0:
+                        task.current_processing_speed = (task.attempt_count / processing_time) * 60  # attempts per minute
                 
                 try:
                     result = await ai_orchestrator.claude_service.process_outline(
@@ -249,6 +263,44 @@ class ProjectQueue:
             "completed": len(self.completed),
             "failed": len(self.failed),
             "total_projects": len(self.projects)
+        }
+    
+    def get_realtime_stats(self) -> dict:
+        """Get real-time processing statistics."""
+        processing_projects = [self.projects[pid] for pid in self.processing if pid in self.projects]
+        
+        if not processing_projects:
+            return {
+                'active_threads': 0,
+                'max_concurrent': self.max_concurrent_projects,
+                'resource_utilization': 0.0,
+                'avg_processing_time': 0.0,
+                'avg_processing_speed': 0.0,
+                'total_success_rate': 0.0,
+                'total_attempts': 0,
+                'total_valid': 0
+            }
+        
+        # Calculate real-time metrics
+        total_attempts = sum(p.attempt_count for p in processing_projects)
+        total_valid = sum(p.valid_responses for p in processing_projects)
+        total_processing_time = sum(p.total_processing_time for p in processing_projects)
+        total_speed = sum(p.current_processing_speed for p in processing_projects)
+        
+        avg_processing_time = total_processing_time / len(processing_projects)
+        avg_processing_speed = total_speed / len(processing_projects) if total_speed > 0 else 0
+        success_rate = (total_valid / total_attempts * 100) if total_attempts > 0 else 0
+        resource_utilization = (len(processing_projects) / self.max_concurrent_projects) * 100
+        
+        return {
+            'active_threads': len(processing_projects),
+            'max_concurrent': self.max_concurrent_projects,
+            'resource_utilization': resource_utilization,
+            'avg_processing_time': avg_processing_time,
+            'avg_processing_speed': avg_processing_speed,
+            'total_success_rate': success_rate,
+            'total_attempts': total_attempts,
+            'total_valid': total_valid
         }
     
     async def cleanup_old_projects(self, max_age_hours: int = 24):
